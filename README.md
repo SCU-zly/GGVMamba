@@ -1,7 +1,3 @@
-## Important Notice
-
-This is an incomplete version of the project. A well-organized and user-friendly version will be made available **after our paper is accepted**.
-
 ## Features
 
 - Competitive performance in BAA
