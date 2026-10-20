@@ -71,8 +71,8 @@ def crop_one_hand_half(image_local_path):
     # Loading as PIL.Image, converting to numpy while ensuring grayscale
     img = img.convert('L')
     img = np.array(img)
-    w,h=img.shape
-    im_bbox=[0,0,w//2,h]
+    h, w = img.shape
+    im_bbox = [0, 0, w // 2, h]
     cropped_img = crop_img(img, im_bbox)
     #RHPE data are always inverted
     if np.argmax(np.histogram(cropped_img,20)[0])>10:
@@ -87,7 +87,20 @@ class BAADataset(Dataset):
     """BoneAge dataset for fine-tuning"""
     def __init__(self, img_dir, ann_file, input_size,
                  json_file = None, img_transform = None, dataset=None):
-        self.annotations = pd.concat([pd.read_csv(f) for f in ann_file])
+        if dataset not in (None, 'RSNA', 'RHPE'):
+            raise ValueError('Supported datasets are RSNA and RHPE; DHA has no released adapter.')
+        if isinstance(img_dir, (str, os.PathLike)):
+            img_dir = [img_dir]
+        if isinstance(ann_file, (str, os.PathLike)):
+            ann_file = [ann_file]
+        if isinstance(json_file, (str, os.PathLike)):
+            json_file = [json_file]
+        self.annotations = pd.concat([pd.read_csv(f) for f in ann_file], ignore_index=True)
+        required = 4 if dataset in (None, 'RHPE') else 3
+        if self.annotations.shape[1] < required:
+            raise ValueError(f'Expected at least {required} CSV columns; see README data format.')
+        if json_file and len(json_file) != len(img_dir):
+            raise ValueError('Provide one ROI JSON per image directory.')
         self.img_dir = img_dir
         
         self.kpts = [load_json(f) for f in json_file] if json_file else None
@@ -103,11 +116,15 @@ class BAADataset(Dataset):
         if not isinstance(idx, int):
             idx = idx.item()
         info = self.annotations.iloc[idx]
+        # Read IDs from the column to avoid mixed-row numeric coercion (1 -> 1.0).
+        image_id = self.annotations.iloc[:, 0].iloc[idx]
+        if isinstance(image_id, (float, np.floating)) and image_id.is_integer():
+            image_id = int(image_id)
+        image_name = str(image_id)
         if self.dataset == 'RHPE':
-            image_name=str(info[0]).zfill(5)
-        else:
-            image_name=str(info[0])
+            image_name = image_name.zfill(5)
         
+        img = None
         for i in range(len(self.img_dir)):
             image_local_path = os.path.join(self.img_dir[i], image_name + '.png')
             if self.dataset == 'RSNA':
@@ -125,15 +142,17 @@ class BAADataset(Dataset):
                         img = crop_one_hand_anno(image_local_path, image_name, self.kpts[i])
                     break
         
-        #TODO 这尼玛RHPE/RSNA的inference没标签啊... DHA的inference有标签，但是是不是这样写呢？
-        bone_age = torch.tensor(info[2], dtype = torch.float)
-        gender = torch.tensor(info[1]*1, dtype = torch.float).unsqueeze(-1)
+        if img is None:
+            raise FileNotFoundError(f'Image {image_name}.png not found in {self.img_dir}')
+
+        bone_age = torch.tensor(info.iloc[2], dtype = torch.float)
+        gender = torch.tensor(info.iloc[1]*1, dtype = torch.float).unsqueeze(-1)
 
         if self.dataset == 'RHPE':
             # if self.inference:
-            #     chronological_age = torch.tensor(info[2], dtype = torch.float).unsqueeze(-1)
+            #     chronological_age = torch.tensor(info.iloc[2], dtype = torch.float).unsqueeze(-1)
             # else:
-                chronological_age = torch.tensor(info[3], dtype = torch.float).unsqueeze(-1)
+                chronological_age = torch.tensor(info.iloc[3], dtype = torch.float).unsqueeze(-1)
         else:
             chronological_age = torch.tensor(0, dtype = torch.float).unsqueeze(-1)
 
@@ -162,6 +181,8 @@ def build_BAA_dataset_train(is_train, args):
     third args.dataset
     if dataset is not RHPE,then is_train is false 
     '''
+    if args.dataset not in ('RSNA', 'RHPE'):
+        raise ValueError('Supported datasets are RSNA and RHPE; DHA has no released adapter.')
     if args.dataset == 'RSNA':
         if is_train:
             img_dir = [
@@ -191,7 +212,7 @@ def build_BAA_dataset_train(is_train, args):
             ]
 
         
-    #elif in DHA
+    # RHPE (a distinct dataset from DHA)
     else:
         if is_train:
             img_dir =[
@@ -221,6 +242,17 @@ def build_BAA_dataset_train(is_train, args):
                 # "/data2/zly/BoneData/RHPE/RHPE_ANNOTATIONS/RHPE_anatomical_ROIs_val.json"
                 "/home/data2/zly/BoneData/RHPE/RHPE_ANNOTATIONS/RHPE_anatomical_ROIs_val.json"
             ]
+
+    # Keep legacy defaults, with a portable root override.
+    data_root = os.environ.get('GGVMAMBA_DATA_ROOT')
+    if data_root:
+        legacy_root = '/home/data2/zly/BoneData/'
+        img_dir = [os.path.join(data_root, os.path.relpath(p, legacy_root)) for p in img_dir]
+        ann_file = [os.path.join(data_root, os.path.relpath(p, legacy_root)) for p in ann_file]
+        json_file = [os.path.join(data_root, os.path.relpath(p, legacy_root)) for p in json_file]
+    # RSNA uses whole images; ROI files are not consumed in __getitem__.
+    if args.dataset == 'RSNA':
+        json_file = None
 
     dataset = BAADataset(input_size=args.input_size,img_transform=args.img_transform,dataset=args.dataset,img_dir=img_dir, ann_file=ann_file,json_file=json_file)
     return dataset
